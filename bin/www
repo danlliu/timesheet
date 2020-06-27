@@ -1,0 +1,164 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('timeclock:server');
+var http = require('http');
+var socketio = require('socket.io');
+var fs = require('fs');
+
+const rll = require('read-last-lines');
+const csv = require('csvtojson');
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+const io = socketio(server);
+
+function getDateTimestamp() {
+  let d = new Date();
+  return `${d.getFullYear()}/${d.getMonth() < 9 ? `0${d.getMonth() + 1}` : d.getMonth() + 1}/${d.getDate() < 10 ? `0${d.getDate()}` : d.getDate()}`;
+}
+
+function dateToTimestamp(num) {
+  let d = new Date(num);
+  let hh = d.getHours();
+  return `${hh > 12 ? hh - 12 : (hh < 10 ? `0${hh}` : hh)}:${d.getMinutes() < 10 ? `0${d.getMinutes()}` : d.getMinutes()} ${hh < 12 ? "am" : "pm"}`;
+}
+
+let timeData = {
+  '__DATE': getDateTimestamp()
+};
+
+let filestreams = {
+  '__LOG': getStream('log', 'txt')
+};
+
+function getStream(username, ext = 'csv') {
+  if (fs.existsSync(`${username}.${ext}`)) {
+    return fs.createWriteStream(`${username}.${ext}`, {flags:'a'});
+  }
+  let ws = fs.createWriteStream(`${username}.${ext}`, {flags:'a'});
+  if (ext == 'csv') {ws.write("date,clockin,clockout,hours\n");}
+  return ws;
+}
+
+io.on('connection', (socket) => {
+  console.log("Connected");
+
+  socket.on('login', (username) => {
+    if (!fs.existsSync(`${username}.csv`)) {
+      getStream(username).end();
+    }
+    csv().fromFile(`${username}.csv`).then((json) => {
+      console.log(timeData[username]);
+      io.emit(`${username}-online`, {times: timeData[username], history: json.reverse()});
+    });
+  })
+
+  socket.on('clockin', (username) => {
+    console.log('clockin');
+    timeData[username] = [Date.now(), null];
+    filestreams['__LOG'] = getStream('log', 'txt');
+    filestreams['__LOG'].write(`${username} clocked in on ${getDateTimestamp()} at ${dateToTimestamp(Date.now())}\n`);
+    filestreams['__LOG'].end();
+    console.log(`${username}-clockin`);
+    io.emit(`${username}-in`, {times: timeData[username]});
+  });
+
+  socket.on('clockout', (username, datetime) => {
+    console.log('clockout');
+    timeData[username][1] = datetime;
+    io.emit(`${username}-out`, {times: timeData[username]});
+    filestreams['__LOG'] = getStream('log', 'txt');
+    filestreams['__LOG'].write(`${username} clocked out on ${getDateTimestamp()} at ${dateToTimestamp(datetime)}\n`);
+    filestreams['__LOG'].end();
+    let hours = timeData[username][1] - timeData[username][0];
+    hours /= (1000 * 3600);
+    hours = Math.round(hours * 10) / 10;
+    filestreams[username] = getStream(username);
+    filestreams[username].write(`${getDateTimestamp()},${dateToTimestamp(timeData[username][0])},${dateToTimestamp(timeData[username][1])},${hours}\n`);
+    filestreams[username].end();
+  });
+
+});
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
